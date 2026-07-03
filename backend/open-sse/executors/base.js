@@ -106,6 +106,10 @@ export class BaseExecutor {
 
     // Schedule retry via retryConfig[statusKey]. Returns true when caller should `urlIndex--; continue`
     const tryRetry = async (urlIndex, statusKey, reason) => {
+      // Don't retry internally on the same URL for 429/403 (account exhaustion)
+      // Allow fallback to next URL or account rotation instead
+      if (statusKey === HTTP_STATUS.RATE_LIMITED || statusKey === HTTP_STATUS.FORBIDDEN) return false;
+
       const { attempts, delayMs } = resolveRetryEntry(retryConfig[statusKey]);
       if (attempts <= 0 || retryAttemptsByUrl[urlIndex] >= attempts) return false;
       retryAttemptsByUrl[urlIndex]++;

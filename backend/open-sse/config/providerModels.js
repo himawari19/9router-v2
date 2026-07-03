@@ -64,12 +64,12 @@ export const PROVIDER_MODELS = {
     { id: "gpt-5.4", name: "GPT 5.4" },
     { id: "gpt-5.4-mini", name: "GPT 5.4 Mini" },
     // GPT 5.3 Codex - all thinking levels
-    { id: "gpt-5.3-codex", name: "GPT 5.3 Codex" },
-    { id: "gpt-5.3-codex-xhigh", name: "GPT 5.3 Codex (xHigh)" },
-    { id: "gpt-5.3-codex-high", name: "GPT 5.3 Codex (High)" },
-    { id: "gpt-5.3-codex-low", name: "GPT 5.3 Codex (Low)" },
-    { id: "gpt-5.3-codex-none", name: "GPT 5.3 Codex (None)" },
-    { id: "gpt-5.3-codex-spark", name: "GPT 5.3 Codex Spark" },
+    { id: "gpt-5.3-codex", name: "GPT 5.3 Codex", upstreamModelId: "gpt-5.5" },
+    { id: "gpt-5.3-codex-xhigh", name: "GPT 5.3 Codex (xHigh)", upstreamModelId: "gpt-5.5" },
+    { id: "gpt-5.3-codex-high", name: "GPT 5.3 Codex (High)", upstreamModelId: "gpt-5.5" },
+    { id: "gpt-5.3-codex-low", name: "GPT 5.3 Codex (Low)", upstreamModelId: "gpt-5.5" },
+    { id: "gpt-5.3-codex-none", name: "GPT 5.3 Codex (None)", upstreamModelId: "gpt-5.5" },
+    { id: "gpt-5.3-codex-spark", name: "GPT 5.3 Codex Spark", upstreamModelId: "gpt-5.5" },
     // Image models (uses image_generation tool, requires Plus/Pro plan)
     { id: "gpt-5.5-image", name: "GPT 5.5 Image", type: "image", capabilities: ["text2img", "edit"],
       description: "OpenAI GPT 5.5 image generation via Codex Responses API. Requires ChatGPT Plus or Pro plan.",
@@ -1589,8 +1589,14 @@ export function getModelUpstreamId(aliasOrId, modelId) {
   const models = PROVIDER_MODELS[aliasOrId];
   const found = models?.find(m => m.id === modelId);
   if (found?.upstreamModelId) return found.upstreamModelId;
-  if (aliasOrId === "cx" && typeof modelId === "string" && modelId.endsWith(CODEX_REVIEW_SUFFIX)) {
-    return modelId.slice(0, -CODEX_REVIEW_SUFFIX.length);
+  
+  if (aliasOrId === "cx" && typeof modelId === "string") {
+    const suffixes = ["-high", "-low", "-xhigh", "-none", "-spark", "-review"];
+    for (const suffix of suffixes) {
+      if (modelId.endsWith(suffix)) {
+        return modelId.slice(0, -suffix.length);
+      }
+    }
   }
   return modelId;
 }
