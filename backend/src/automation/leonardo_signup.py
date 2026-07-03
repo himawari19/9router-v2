@@ -505,30 +505,33 @@ def run_automation(email, password, invite_link, proxy=None, headless=True):
             # 2. Leonardo Signup
             # Intercept /api/auth/get-session untuk capture JWT langsung dari response
             captured_jwt = {"value": ""}
+            def _find_jwt_in(obj, depth=0):
+                if depth > 6: return ""
+                if isinstance(obj, str) and obj.startswith("eyJ") and len(obj) > 100: return obj
+                if isinstance(obj, dict):
+                    for v in obj.values():
+                        r = _find_jwt_in(v, depth+1)
+                        if r: return r
+                if isinstance(obj, list):
+                    for v in obj:
+                        r = _find_jwt_in(v, depth+1)
+                        if r: return r
+                return ""
             def handle_response(response):
                 try:
-                    if "leonardo.ai/api/auth/get-session" in response.url and response.status == 200:
-                        data = response.json()
-                        # JWT bisa nested di berbagai field
-                        def find_jwt(obj, depth=0):
-                            if depth > 5: return ""
-                            if isinstance(obj, str) and obj.startswith("eyJ") and len(obj) > 100:
-                                return obj
-                            if isinstance(obj, dict):
-                                for v in obj.values():
-                                    r = find_jwt(v, depth+1)
-                                    if r: return r
-                            if isinstance(obj, list):
-                                for v in obj:
-                                    r = find_jwt(v, depth+1)
-                                    if r: return r
-                            return ""
-                        jwt = find_jwt(data)
-                        if jwt:
-                            captured_jwt["value"] = jwt
-                            log_step(f"JWT captured dari get-session intercept!")
+                    if "leonardo.ai/api/auth/get-session" not in response.url: return
+                    if response.status != 200: return
+                    body = response.text()  # sync in Playwright Python
+                    if not body or body.strip() == 'null': return
+                    import json as _json
+                    data = _json.loads(body)
+                    jwt = _find_jwt_in(data)
+                    if jwt:
+                        captured_jwt["value"] = jwt
+                        log_step(f"JWT captured dari get-session intercept!")
                 except Exception: pass
-            page.on("response", handle_response)
+            # Pasang di context (semua page) bukan hanya page ini
+            browser.contexts[0].on("response", handle_response)
 
             log_step("Membuka Leonardo AI — login page...")
             page.goto("https://app.leonardo.ai/auth/login", wait_until="domcontentloaded", timeout=60000)
@@ -581,10 +584,38 @@ def run_automation(email, password, invite_link, proxy=None, headless=True):
             log_step("Mengekstrak cookies + JWT session Leonardo...")
             all_cookies = page.context.cookies()
             leo_cookies = [c for c in all_cookies if "leonardo.ai" in (c.get("domain") or "")]
-            # Fallback: ambil semua cookie jika leonardo.ai tidak ada
             if not leo_cookies:
                 leo_cookies = all_cookies
             cookie_str = "; ".join(f"{c['name']}={c['value']}" for c in leo_cookies)
+
+            # Langsung panggil get-session dari dalam browser (pakai session yang sudah ada)
+            log_step("Memanggil /api/auth/get-session dari browser untuk capture JWT...")
+            try:
+                session_data = page.evaluate("""async () => {
+                    try {
+                        const res = await fetch('https://app.leonardo.ai/api/auth/get-session', {
+                            credentials: 'include',
+                            headers: { 'Accept': 'application/json' }
+                        });
+                        if (!res.ok) return null;
+                        return await res.json();
+                    } catch(e) { return null; }
+                }""")
+                if session_data:
+                    def _find_jwt_sess(obj, depth=0):
+                        if depth > 6: return ""
+                        if isinstance(obj, str) and obj.startswith("eyJ") and len(obj) > 100: return obj
+                        if isinstance(obj, dict):
+                            for v in obj.values():
+                                r = _find_jwt_sess(v, depth+1)
+                                if r: return r
+                        return ""
+                    _j = _find_jwt_sess(session_data)
+                    if _j:
+                        captured_jwt["value"] = _j
+                        log_step(f"JWT didapat dari get-session in-browser! (len={len(_j)})")
+            except Exception as e:
+                log_step(f"get-session in-browser gagal: {e}")
 
             # Extract JWT dari localStorage + sessionStorage + cookie values
             jwt_token = ""
