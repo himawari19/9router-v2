@@ -334,7 +334,43 @@ def extract_global_api_key(page, password):
     try:
         page.goto("https://dash.cloudflare.com/profile/api-tokens", wait_until="domcontentloaded", timeout=30000)
         wait_for_cf_clearance(page, timeout=20)
-        time.sleep(2)
+        time.sleep(3)
+
+        # ── Handle security verification popup ────────────────────────────────
+        # CF sometimes shows "Send a one-time code" or "Verify your identity" popup
+        popup_selectors = [
+            "button:has-text('Send a code')",
+            "button:has-text('Send code')",
+            "button:has-text('Skip')",
+            "button:has-text('Cancel')",
+            "button:has-text('Dismiss')",
+            "button:has-text('Close')",
+            "[aria-label='Close']",
+            "[data-testid='dismiss-button']",
+        ]
+        for sel in popup_selectors:
+            try:
+                btn = page.locator(sel).first
+                if btn.is_visible(timeout=1500):
+                    log_step(f"Popup terdeteksi, dismiss: {sel}")
+                    btn.click()
+                    time.sleep(1)
+                    break
+            except Exception:
+                continue
+
+        # If "Send a code" popup — click Send, wait for OTP field, skip (close modal)
+        try:
+            send_code = page.locator("button:has-text('Send a one-time code'), button:has-text('Send verification')").first
+            if send_code.is_visible(timeout=1000):
+                log_step("Security code popup — menutup modal...")
+                # Try ESC key to close
+                page.keyboard.press("Escape")
+                time.sleep(1)
+        except Exception:
+            pass
+
+        time.sleep(1)
 
         # Find "View" button for Global API Key
         view_selectors = [
@@ -591,72 +627,172 @@ def main():
             log_step("Ammail tidak dikonfigurasi — skip email verification, lanjut login manual...")
             time.sleep(5)
 
-        # ── Step 7: Login if needed ───────────────────────────────────────────
-        current_url = page.url
-        if "login" in current_url or "sign-in" in current_url or "dash.cloudflare.com" not in current_url:
-            log_step("Melakukan login ke Cloudflare Dashboard...")
+        # ── Step 7: Login (always after email verification) ──────────────────
+        log_step("Login ke Cloudflare Dashboard...")
+        try:
+            page.goto("https://dash.cloudflare.com/login", wait_until="domcontentloaded", timeout=20000)
+            time.sleep(2)
+
+            # Wait for login form
+            page.wait_for_selector("input[name='email'], input[autocomplete='email']", timeout=10000)
+
+            # Fill email + password
+            for sel in ["input[name='email']", "input[autocomplete='email']", "input[type='email']"]:
+                try:
+                    el = page.locator(sel).first
+                    if el.is_visible(timeout=1500):
+                        el.fill(args.email)
+                        break
+                except Exception:
+                    continue
+
+            pw_el = page.locator("input[name='password'], input[type='password']").first
+            if pw_el.is_visible(timeout=3000):
+                pw_el.fill(args.password)
+
+            time.sleep(1)
+
+            # Solve Turnstile on login page
+            login_turnstile_solved = False
             try:
-                page.goto("https://dash.cloudflare.com/login", wait_until="domcontentloaded", timeout=20000)
-                wait_for_cf_clearance(page, timeout=20)
-                time.sleep(1)
+                token_val = page.evaluate("() => { const el = document.getElementsByName('cf_challenge_response')[0]; return el ? el.value : ''; }")
+                if token_val and len(token_val.strip()) > 10:
+                    login_turnstile_solved = True
+                    log_step("Turnstile login auto-solved!")
+            except Exception:
+                pass
 
-                for sel in email_sel:
-                    try:
-                        el = page.locator(sel).first
-                        if el.is_visible(timeout=2000):
-                            el.fill(args.email)
-                            break
-                    except Exception:
-                        continue
+            if not login_turnstile_solved and args.captcha_key:
+                log_step("Solve Turnstile login via 2Captcha...")
+                login_token = solve_turnstile_2captcha(
+                    args.captcha_key,
+                    "https://dash.cloudflare.com/login",
+                    CF_SIGNUP_TURNSTILE_SITEKEY,
+                    timeout=120,
+                )
+                if login_token:
+                    inject_turnstile_token(page, login_token)
+                    login_turnstile_solved = True
+                    time.sleep(1)
+                    log_step("Turnstile login injected via 2Captcha!")
 
-                pw_el = page.locator("input[type='password']").first
-                if pw_el.is_visible(timeout=3000):
-                    pw_el.fill(args.password)
+            # Submit login
+            for sel in ["button[type='submit']", "button:has-text('Sign in')", "button:has-text('Log in')"]:
+                try:
+                    btn = page.locator(sel).first
+                    if btn.is_visible(timeout=1000):
+                        btn.click()
+                        break
+                except Exception:
+                    continue
 
-                time.sleep(0.5)
-                for sel in submit_selectors:
-                    try:
-                        btn = page.locator(sel).first
-                        if btn.is_visible(timeout=1000):
-                            btn.click()
-                            break
-                    except Exception:
-                        continue
+            log_step("Menunggu redirect ke dashboard...")
+            time.sleep(6)
 
-                time.sleep(4)
-                wait_for_cf_clearance(page, timeout=20)
-            except Exception as e:
-                log_step(f"Login error: {e}")
+            # Check for login errors
+            try:
+                err_text = page.locator("text=Complete the Turnstile, text=Invalid credentials, .error-message").first
+                if err_text.is_visible(timeout=1000):
+                    log_step(f"Login warning: Turnstile atau credentials error, retry...")
+            except Exception:
+                pass
+
+            current_url = page.url
+            log_step(f"After login URL: {current_url}")
+
+        except Exception as e:
+            log_step(f"Login error: {e}")
 
         # ── Step 8: Get to dashboard and extract account ID ───────────────────
         log_step("Memuat Cloudflare Dashboard...")
         try:
-            page.goto("https://dash.cloudflare.com/", wait_until="domcontentloaded", timeout=30000)
+            # Navigate to /home which always redirects to account-specific URL
+            page.goto("https://dash.cloudflare.com/home", wait_until="domcontentloaded", timeout=30000)
             wait_for_cf_clearance(page, timeout=20)
-            time.sleep(2)
+            time.sleep(3)
         except Exception as e:
             log_step(f"Dashboard load warning: {e}")
-            # Try opening a new page if current one died
             try:
                 page = browser.new_page()
-                page.goto("https://dash.cloudflare.com/", wait_until="domcontentloaded", timeout=30000)
+                page.goto("https://dash.cloudflare.com/home", wait_until="domcontentloaded", timeout=30000)
                 wait_for_cf_clearance(page, timeout=20)
-                time.sleep(2)
+                time.sleep(3)
             except Exception as e2:
                 log_step(f"New page also failed: {e2}")
 
-        # Extract account_id from URL
+        # Extract account_id — try multiple methods
         account_id = ""
+
+        # Method 1: from URL (after /home redirect)
         try:
-            for _ in range(6):
+            for _ in range(8):
                 url_match = re.search(r"/([a-f0-9]{32})(?:/|$)", page.url)
                 if url_match:
                     account_id = url_match.group(1)
-                    log_step(f"Account ID: {account_id[:8]}...")
+                    log_step(f"Account ID from URL: {account_id[:8]}...")
                     break
                 time.sleep(1)
         except Exception as e:
-            log_step(f"account_id extract error: {e}")
+            log_step(f"account_id from URL error: {e}")
+
+        # Method 2: from JS window/React state
+        if not account_id:
+            try:
+                acct_js = page.evaluate("""
+                () => {
+                    try {
+                        // Try window.__INITIAL_STATE__ or similar
+                        if (window.__BOOTSTRAP_DATA__) return window.__BOOTSTRAP_DATA__.account_id || '';
+                        if (window.__cf_data__) return window.__cf_data__.accountId || '';
+                        // Try from meta tags
+                        var m = document.querySelector('meta[name="account-id"]');
+                        if (m) return m.content;
+                        // Try URL one more time
+                        var m2 = window.location.pathname.match(/\\/([a-f0-9]{32})(?:\\/|$)/);
+                        if (m2) return m2[1];
+                    } catch(e) {}
+                    return '';
+                }
+                """)
+                if acct_js and len(acct_js) == 32:
+                    account_id = acct_js
+                    log_step(f"Account ID from JS: {account_id[:8]}...")
+            except Exception as e:
+                log_step(f"account_id from JS error: {e}")
+
+        # Method 3: CF API /accounts using session cookies
+        if not account_id:
+            try:
+                log_step("Mengambil Account ID via CF API dengan session cookie...")
+                cookies = page.context.cookies()
+                cookie_str = "; ".join(f"{c['name']}={c['value']}" for c in cookies if "cloudflare" in c.get("domain",""))
+                req = urllib.request.Request("https://api.cloudflare.com/client/v4/accounts?per_page=1")
+                req.add_header("Cookie", cookie_str)
+                req.add_header("User-Agent", "Mozilla/5.0 Chrome/125.0")
+                with urllib.request.urlopen(req, timeout=10) as r:
+                    data = json.loads(r.read())
+                    if data.get("success") and data.get("result"):
+                        account_id = data["result"][0]["id"]
+                        log_step(f"Account ID via API: {account_id[:8]}...")
+            except Exception as e:
+                log_step(f"account_id via API error: {e}")
+
+        # Method 4: navigate to /accounts and parse
+        if not account_id:
+            try:
+                page.goto("https://dash.cloudflare.com/?to=/:account/home", wait_until="domcontentloaded", timeout=15000)
+                time.sleep(3)
+                url_match = re.search(r"/([a-f0-9]{32})(?:/|$)", page.url)
+                if url_match:
+                    account_id = url_match.group(1)
+                    log_step(f"Account ID via redirect: {account_id[:8]}...")
+            except Exception as e:
+                log_step(f"account_id method4 error: {e}")
+
+        if account_id:
+            log_step(f"Account ID confirmed: {account_id[:8]}...")
+        else:
+            log_step("WARN: Account ID tidak ditemukan, lanjut tanpa account_id")
 
         # ── Step 9: Extract Global API Key ────────────────────────────────────
         global_key = None
@@ -666,8 +802,9 @@ def main():
             log_step(f"extract_global_api_key failed: {e}")
 
         if not global_key:
-            log_step("Global API Key tidak bisa diambil langsung...")
+            log_step("Global API Key tidak bisa diambil, akan pakai Workers AI Token saja...")
 
+        # Only die if BOTH missing
         if not global_key and not account_id:
             die("Tidak bisa mengambil API Key atau Account ID. Coba manual.")
 
