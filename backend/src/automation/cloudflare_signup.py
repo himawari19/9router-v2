@@ -1305,32 +1305,50 @@ def main():
 
                                 page.screenshot(path="/tmp/cf_gak_before_submit.png")
 
-                                # Click View button inside the dialog, then Submit
+                                # Click View button INSIDE the modal (not the background View)
+                                # Background page has [View] → modal has [View] — use .last to get modal's View
+                                # Enumerate all visible View buttons for debugging
+                                _view_cnt = page.locator("button:has-text('View')").count()
+                                log_step(f"View buttons on page: {_view_cnt}")
+                                _clicked_view = False
                                 for btn_sel in [
                                     "[role='dialog'] button:has-text('View')",
                                     "[role='dialog'] button[type='submit']",
-                                    "button:has-text('View')",
-                                    "button[type='submit']",
                                 ]:
                                     try:
-                                        b = page.locator(btn_sel).first
-                                        if b.count() > 0 and b.is_visible(timeout=2000):
-                                            b.click()
-                                            time.sleep(15)  # wait for Camoufox Turnstile auto-solve
-                                            log_step(f"OTP submitted via: {btn_sel}")
-                                            page.screenshot(path="/tmp/cf_gak_after_submit.png")
-                                            # Check if CAPTCHA error still shown → retry once
-                                            _body_txt = page.inner_text("body")
-                                            if "CAPTCHA" in _body_txt or "captcha" in _body_txt:
-                                                log_step("CAPTCHA still shown, wait 10s more...")
-                                                time.sleep(10)
-                                                b2 = page.locator(btn_sel).first
-                                                if b2.count() > 0 and b2.is_visible(timeout=2000):
-                                                    b2.click()
-                                                    time.sleep(10)
+                                        b = page.locator(btn_sel)
+                                        if b.count() > 0 and b.first.is_visible(timeout=1000):
+                                            b.first.click()
+                                            _clicked_view = True
+                                            log_step(f"OTP submitted via dialog: {btn_sel}")
                                             break
                                     except Exception:
-                                        continue
+                                        pass
+
+                                if not _clicked_view:
+                                    # Use LAST View button (modal's View comes after background's View in DOM)
+                                    try:
+                                        _all_views = page.locator("button:has-text('View')")
+                                        _cnt = _all_views.count()
+                                        log_step(f"Trying last View ({_cnt} total)...")
+                                        if _cnt > 0:
+                                            _all_views.last.click()
+                                            _clicked_view = True
+                                            log_step("OTP submitted via: button.last View")
+                                    except Exception as _le:
+                                        log_step(f"Last View err: {_le}")
+
+                                if not _clicked_view:
+                                    try:
+                                        page.locator("button[type='submit']").last.click()
+                                        _clicked_view = True
+                                        log_step("OTP submitted via: button[type=submit].last")
+                                    except Exception:
+                                        pass
+
+                                if _clicked_view:
+                                    time.sleep(5)
+                                    page.screenshot(path="/tmp/cf_gak_after_submit.png")
                             else:
                                 log_step("OTP input not found via any selector")
 
