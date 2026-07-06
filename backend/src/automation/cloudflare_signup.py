@@ -1383,43 +1383,49 @@ def main():
                 for _gk_poll in range(30):
                     page.screenshot(path="/tmp/cf_globalkey_page.png")
                     try:
-                        # 1. Check ALL input values (including hidden) via evaluate
+                        # 1. Check ALL input + TEXTAREA values via evaluate
                         _all_vals = page.evaluate("""
                             () => {
                                 const vals = [];
-                                document.querySelectorAll('input').forEach(el => {
+                                document.querySelectorAll('input, textarea').forEach(el => {
                                     if (el.value && el.value.length > 20) vals.push(el.value);
+                                });
+                                // Also check text content of specific elements
+                                document.querySelectorAll('code, pre, [class*="key"], [class*="token"]').forEach(el => {
+                                    const t = el.textContent || '';
+                                    if (t.length > 20) vals.push(t.trim());
                                 });
                                 return vals.join('|||');
                             }
                         """)
                         if _all_vals:
-                            _gk_m = _re2.search(_key_regex, _all_vals)
+                            # CF key formats: cfk_XXX (User API Token) OR 40-char hex (Global API Key)
+                            _gk_m = _re2.search(r'(cfk_[a-zA-Z0-9]{30,}|[a-f0-9]{36,45})', _all_vals)
                             if _gk_m:
                                 global_key = _gk_m.group(1)
-                                log_step(f"GAK from input val (poll {_gk_poll}): {global_key[:8]}...")
+                                log_step(f"GAK from input/textarea (poll {_gk_poll}): {global_key[:12]}...")
                                 break
 
-                        # 2. Check inner text (visible key as text)
+                        # 2. Check inner text
                         body_text = page.inner_text("body")
-                        _gk_m2 = _re2.search(_key_regex, body_text)
+                        _gk_m2 = _re2.search(r'(cfk_[a-zA-Z0-9]{30,}|[a-f0-9]{36,45})', body_text)
                         if _gk_m2:
                             global_key = _gk_m2.group(1)
-                            log_step(f"GAK from body text (poll {_gk_poll}): {global_key[:8]}...")
+                            log_step(f"GAK from body text (poll {_gk_poll}): {global_key[:12]}...")
                             break
 
-                        # 3. Specific selectors
-                        for _sel in ["input[readonly]", "code", "[class*='key']", "[class*='api']"]:
+                        # 3. Textarea specifically
+                        for _sel in ["textarea", "input[readonly]", "code"]:
                             try:
                                 _el = page.locator(_sel).first
                                 if _el.count() > 0:
-                                    _v = _el.input_value() if "input" in _sel else _el.text_content()
-                                    _v = (_v or "").strip()
-                                    if _v and len(_v) >= 36 and ' ' not in _v:
-                                        _gk_m3 = _re2.search(_key_regex, _v)
+                                    _v = (_el.input_value() if "input" in _sel or _sel=="textarea" else _el.text_content()) or ""
+                                    _v = _v.strip()
+                                    if len(_v) > 20 and ' ' not in _v:
+                                        _gk_m3 = _re2.search(r'(cfk_[a-zA-Z0-9]{30,}|[a-f0-9]{36,45})', _v)
                                         if _gk_m3:
                                             global_key = _gk_m3.group(1)
-                                            log_step(f"GAK from {_sel} (poll {_gk_poll}): {global_key[:8]}...")
+                                            log_step(f"GAK from {_sel} (poll {_gk_poll}): {global_key[:12]}...")
                                             break
                             except Exception:
                                 pass
