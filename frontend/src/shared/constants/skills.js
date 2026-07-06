@@ -1,7 +1,7 @@
 // Agent Skills metadata — single source of truth for /dashboard/skills page.
 // Each skill = 1 raw GitHub URL the user copies and pastes to any AI agent.
 
-const REPO = "decolua/9router";
+const REPO = "ahwanulm/9router-v2";
 const BRANCH = "master";
 const SKILL_PATH = "skills";
 
@@ -66,6 +66,20 @@ export const SKILLS = [
     description: "URL → markdown / text / HTML via Firecrawl, Jina, Tavily, Exa.",
     endpoint: "/v1/web/fetch",
     icon: "language",
+  },
+  {
+    id: "using-superpowers",
+    name: "Using Superpowers",
+    description: "Use when starting any conversation — establishes how to find and use skills before ANY response.",
+    endpoint: null,
+    icon: "bolt",
+  },
+  {
+    id: "multi-brain",
+    name: "Multi-Brain Memory",
+    description: "Share work and memory across Claude Code, OpenCode, Codex, and other agents via a two-level memory index.",
+    endpoint: null,
+    icon: "memory",
   },
 ];
 
