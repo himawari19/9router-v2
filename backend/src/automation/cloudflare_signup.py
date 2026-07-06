@@ -1356,30 +1356,63 @@ def main():
                 except Exception:
                     pass
 
-                # Extract Global API Key value
+                # Extract Global API Key — poll every 2s for up to 60s
+                # Key appears in input value after modal closes/changes
                 global_key = None
-                page.screenshot(path="/tmp/cf_globalkey_page.png")
-                body_text = page.inner_text("body")
-                # CF global key is 37 chars hex-ish
                 import re as _re2
-                gk_match = _re2.search(r'\b([a-f0-9A-F0-9]{30,45})\b', body_text)
-                if gk_match:
-                    global_key = gk_match.group(1)
-                    log_step(f"Global API Key (from body): {global_key[:8]}...")
+                _key_regex = r'\b([a-f0-9]{36,45})\b'
 
-                if not global_key:
-                    for sel in ["input[readonly]", "code", "[class*='api-key']", "input[type='text']"]:
-                        try:
-                            el = page.locator(sel).first
-                            if el.count() > 0 and el.is_visible(timeout=2000):
-                                val = el.input_value() if "input" in sel else el.text_content()
-                                val = (val or "").strip()
-                                if val and len(val) > 20 and ' ' not in val:
-                                    global_key = val
-                                    log_step(f"Global API Key: {val[:8]}...")
-                                    break
-                        except Exception:
-                            continue
+                for _gk_poll in range(30):
+                    page.screenshot(path="/tmp/cf_globalkey_page.png")
+                    try:
+                        # 1. Check ALL input values (including hidden) via evaluate
+                        _all_vals = page.evaluate("""
+                            () => {
+                                const vals = [];
+                                document.querySelectorAll('input').forEach(el => {
+                                    if (el.value && el.value.length > 20) vals.push(el.value);
+                                });
+                                return vals.join('|||');
+                            }
+                        """)
+                        if _all_vals:
+                            _gk_m = _re2.search(_key_regex, _all_vals)
+                            if _gk_m:
+                                global_key = _gk_m.group(1)
+                                log_step(f"GAK from input val (poll {_gk_poll}): {global_key[:8]}...")
+                                break
+
+                        # 2. Check inner text (visible key as text)
+                        body_text = page.inner_text("body")
+                        _gk_m2 = _re2.search(_key_regex, body_text)
+                        if _gk_m2:
+                            global_key = _gk_m2.group(1)
+                            log_step(f"GAK from body text (poll {_gk_poll}): {global_key[:8]}...")
+                            break
+
+                        # 3. Specific selectors
+                        for _sel in ["input[readonly]", "code", "[class*='key']", "[class*='api']"]:
+                            try:
+                                _el = page.locator(_sel).first
+                                if _el.count() > 0:
+                                    _v = _el.input_value() if "input" in _sel else _el.text_content()
+                                    _v = (_v or "").strip()
+                                    if _v and len(_v) >= 36 and ' ' not in _v:
+                                        _gk_m3 = _re2.search(_key_regex, _v)
+                                        if _gk_m3:
+                                            global_key = _gk_m3.group(1)
+                                            log_step(f"GAK from {_sel} (poll {_gk_poll}): {global_key[:8]}...")
+                                            break
+                            except Exception:
+                                pass
+                        if global_key:
+                            break
+
+                        log_step(f"GAK poll {_gk_poll}/30 — no key yet")
+                    except Exception as _pe:
+                        log_step(f"GAK poll error: {_pe}")
+
+                    time.sleep(2)
 
                 if not global_key:
                     log_step("Global API Key tidak ditemukan")
