@@ -31,11 +31,14 @@ export const MEMORY_CONFIG = {
   proxyDispatchersMaxSize: 20,
 };
 
-// Stream stall timeout: abort if no chunk received within this duration
-export const STREAM_STALL_TIMEOUT_MS = 60 * 1000;
+// Stream stall timeout: abort if no chunk received within this duration.
+// Set to 5 minutes to accommodate reasoning models (GLM-5.2, DeepSeek-R1, QwQ, etc.)
+// that can "think" silently for minutes before sending the first token.
+export const STREAM_STALL_TIMEOUT_MS = 5 * 60 * 1000;
 
-// Fetch connect timeout: abort if upstream doesn't return response headers within this duration
-export const FETCH_CONNECT_TIMEOUT_MS = 60 * 1000;
+// Fetch connect timeout: abort if upstream doesn't return response headers within this duration.
+// Set to 2 minutes to allow slow cold starts on free-tier providers (Cloudflare AI, etc.)
+export const FETCH_CONNECT_TIMEOUT_MS = 2 * 60 * 1000;
 
 // Default token limits
 export const DEFAULT_MAX_TOKENS = 64000;

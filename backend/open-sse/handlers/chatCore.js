@@ -141,6 +141,26 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     log?.debug?.("CODEBUDDY", "Sanitized system prompt for Tencent content moderation");
   }
 
+  // Cloudflare Workers AI: cap max_tokens + truncate messages to prevent runaway reasoning.
+  // Free tier has ~75s execution limit and very limited compute.
+  // 104K tokens context = always slow/timeout. Keep last 20 msgs to stay under ~25K tokens.
+  if (provider === "cloudflare-ai") {
+    // Cap output tokens
+    if (!translatedBody.max_tokens) {
+      translatedBody.max_tokens = 8192;
+    }
+
+    // Truncate messages: keep system (idx 0) + last 20 non-system messages
+    if (Array.isArray(translatedBody.messages) && translatedBody.messages.length > 22) {
+      const system = translatedBody.messages[0]?.role === "system" ? [translatedBody.messages[0]] : [];
+      const nonSystem = translatedBody.messages.filter(m => m.role !== "system");
+      const kept = nonSystem.slice(-20); // last 20 messages
+      const before = translatedBody.messages.length;
+      translatedBody.messages = [...system, ...kept];
+      log?.info?.("CF-AI", `Truncated ${before} → ${translatedBody.messages.length} msgs (kept last 20 + system)`);
+    }
+  }
+
   const executor = getExecutor(provider);
   trackPendingRequest(model, provider, connectionId, true);
   appendRequestLog({ model, provider, connectionId, status: "PENDING" }).catch(() => { });

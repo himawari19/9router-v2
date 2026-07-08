@@ -61,6 +61,11 @@ export async function POST_handler(req: any, res: any) {
     const editGroup = permGroups.find(
       (g) => g.name === "Workers AI Edit" || g.name === "Workers AI:Edit"
     );
+    // Account Analytics:Read → needed for GraphQL quota tracking (neuronsUsed per day)
+    const analyticsReadGroup = permGroups.find(
+      (g) => g.name === "Account Analytics Read" || g.name === "Account Analytics:Read"
+        || (g.name.toLowerCase().includes("account analytics") && g.name.toLowerCase().includes("read"))
+    );
 
     if (!readGroup || !editGroup) {
       // Fallback: try to find by partial name
@@ -76,16 +81,19 @@ export async function POST_handler(req: any, res: any) {
     const finalReadGroup = readGroup || permGroups.find((g) => g.name.toLowerCase().includes("workers ai") && g.name.toLowerCase().includes("read"));
     const finalEditGroup = editGroup || permGroups.find((g) => g.name.toLowerCase().includes("workers ai") && g.name.toLowerCase().includes("edit"));
 
-    // 3. Create token
+    // 3. Create token — include Account Analytics:Read for GraphQL quota tracking
+    const permissionGroups: { id: string }[] = [
+      { id: finalReadGroup!.id },
+      { id: finalEditGroup!.id },
+    ];
+    if (analyticsReadGroup) permissionGroups.push({ id: analyticsReadGroup.id });
+
     const tokenPayload = {
       name: tokenName || "9router Workers AI",
       policies: [
         {
           effect: "allow",
-          permission_groups: [
-            { id: finalReadGroup!.id },
-            { id: finalEditGroup!.id },
-          ],
+          permission_groups: permissionGroups,
           resources: {
             [`com.cloudflare.api.account.${accountId}`]: "*",
           },

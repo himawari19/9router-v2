@@ -3,7 +3,7 @@ import { getAdapter } from "../driver.js";
 import { parseJson, stringifyJson } from "../helpers/jsonCol.js";
 import { getMeta, setMeta } from "../helpers/metaStore.js";
 
-const PENDING_TIMEOUT_MS = 60 * 1000;
+const PENDING_TIMEOUT_MS = 10 * 60 * 1000; // 10 min — must be > STREAM_STALL_TIMEOUT_MS (5 min) so indicator stays visible during reasoning
 const RING_CAP = 50;
 const CONN_CACHE_TTL_MS = 30 * 1000;
 const PERIOD_MS = { "24h": 86400000, "7d": 604800000, "30d": 2592000000, "60d": 5184000000 };
@@ -18,6 +18,15 @@ if (!global._statsEmitter) {
 if (!global._pendingTimers) global._pendingTimers = {};
 if (!global._recentRing) global._recentRing = { items: [], initialized: false };
 if (!global._connectionMapCache) global._connectionMapCache = { map: {}, ts: 0 };
+// Heartbeat: emit "pending" every 3s while there are active requests so the UI stays live
+if (!global._pendingHeartbeat) {
+  global._pendingHeartbeat = setInterval(() => {
+    if (Object.keys(global._pendingRequests?.byModel || {}).length > 0) {
+      global._statsEmitter?.emit?.("pending");
+    }
+  }, 3000);
+  if (global._pendingHeartbeat?.unref) global._pendingHeartbeat.unref();
+}
 
 const pendingRequests = global._pendingRequests;
 const lastErrorProvider = global._lastErrorProvider;
@@ -215,7 +224,7 @@ export async function getActiveRequests() {
 
   await ensureRingInitialized();
   const seen = new Set();
-  const recentRequests = [...recentRing.items]
+  const completedRequests = [...recentRing.items]
     .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
     .map((e) => {
       const t = e.tokens || {};
@@ -235,6 +244,30 @@ export async function getActiveRequests() {
       return true;
     })
     .slice(0, 20);
+
+  // Prepend in-progress (streaming) requests so they appear at the top of Recent Requests.
+  // These are requests that have started but not yet saved to history (flush not called yet).
+  const now = new Date().toISOString();
+  const inProgressEntries = [];
+  for (const [connectionId, models] of Object.entries(pendingRequests.byAccount)) {
+    for (const [modelKey, count] of Object.entries(models)) {
+      if (count > 0) {
+        const match = modelKey.match(/^(.*) \((.*)\)$/);
+        const modelName = match ? match[1] : modelKey;
+        const providerName = match ? match[2] : "unknown";
+        inProgressEntries.push({
+          timestamp: now,
+          model: modelName,
+          provider: providerName,
+          promptTokens: 0,
+          completionTokens: 0,
+          status: "streaming",
+        });
+      }
+    }
+  }
+
+  const recentRequests = [...inProgressEntries, ...completedRequests].slice(0, 20);
 
   const errorProvider = (Date.now() - lastErrorProvider.ts < 10000) ? lastErrorProvider.provider : "";
   return { activeRequests, recentRequests, errorProvider };

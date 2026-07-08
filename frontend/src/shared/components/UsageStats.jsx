@@ -60,17 +60,26 @@ function RecentRequests({ requests = [] }) {
             </thead>
             <tbody className="divide-y divide-border/50">
               {requests.map((r, i) => {
+                const isStreaming = r.status === "streaming";
                 const ok = !r.status || r.status === "ok" || r.status === "success";
                 return (
                   <tr key={i} className="hover:bg-bg-subtle transition-colors">
                     <td className="py-1.5">
-                      <span className={`block w-1.5 h-1.5 rounded-full ${ok ? "bg-success" : "bg-error"}`} />
+                      {isStreaming
+                        ? <span className="block w-1.5 h-1.5 rounded-full bg-warning animate-pulse" title="Streaming…" />
+                        : <span className={`block w-1.5 h-1.5 rounded-full ${ok ? "bg-success" : "bg-error"}`} />
+                      }
                     </td>
                     <td className="py-1.5 font-mono truncate max-w-[120px]" title={r.model}>{r.model}</td>
                     <td className="py-1.5 text-right whitespace-nowrap">
-                      <span className="text-primary">{fmt(r.promptTokens)}↑</span>
-                      {" "}
-                      <span className="text-success">{fmt(r.completionTokens)}↓</span>
+                      {isStreaming
+                        ? <span className="text-warning italic text-[10px]">streaming…</span>
+                        : <>
+                            <span className="text-primary">{fmt(r.promptTokens)}↑</span>
+                            {" "}
+                            <span className="text-success">{fmt(r.completionTokens)}↓</span>
+                          </>
+                      }
                     </td>
                     <td className="py-1.5 text-right text-text-muted whitespace-nowrap"><TimeAgo timestamp={r.timestamp} /></td>
                   </tr>

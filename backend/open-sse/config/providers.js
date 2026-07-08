@@ -391,9 +391,11 @@ export const PROVIDERS = {
     headers: {}
   },
   // Cloudflare Workers AI - {accountId} resolved from credentials.providerSpecificData.accountId
+  // Free tier: ~75s execution limit. Use 90s timeout to fail fast instead of waiting 5 minutes.
   "cloudflare-ai": {
     baseUrl: "https://api.cloudflare.com/client/v4/accounts/{accountId}/ai/v1/chat/completions",
-    format: "openai"
+    format: "openai",
+    timeoutMs: 90 * 1000,
   },
   "xiaomi-mimo": {
     baseUrl: "https://api.xiaomimimo.com/v1/chat/completions",

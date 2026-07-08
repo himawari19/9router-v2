@@ -1542,17 +1542,111 @@ async function getWeavyUsage(connection, proxyOptions = null) {
 }
 
 /**
- * Fetch Cloudflare Workers AI token status and return free-tier quota info.
+ * Fetch Cloudflare Workers AI quota via GraphQL API.
+ * Queries neuronsSum for current day from Cloudflare Analytics API.
  * CF Workers AI free tier: 10,000 neurons/day (resets daily at midnight UTC).
- * There's no public usage API, so we verify the token and return static quota.
+ * Falls back to token-verify + static quota if GraphQL is unavailable.
  */
 async function getCloudflareAIUsage(connection, proxyOptions = null) {
   const { apiKey, providerSpecificData } = connection;
   if (!apiKey) return { message: "Cloudflare AI usage unavailable: no API token" };
 
+  const accountId = providerSpecificData?.accountId;
+  const fetchFn = proxyOptions ? proxyAwareFetch : fetch;
+
+  // Calculate today's UTC date range for the GraphQL query
+  const now = new Date();
+  const todayUTC = now.toISOString().slice(0, 10); // "YYYY-MM-DD"
+  const nextMidnightUTC = new Date(Date.UTC(
+    now.getUTCFullYear(),
+    now.getUTCMonth(),
+    now.getUTCDate() + 1,
+    0, 0, 0, 0
+  ));
+
+  const FREE_TIER_TOTAL = 10000;
+
+  // === Step 1: Try GraphQL to get real usage (requires accountId + Account Analytics:Read permission) ===
+  if (accountId) {
+    try {
+      // Cloudflare Analytics GraphQL — correct filter format uses datetimeDay_geq/datetimeDay_lt
+      // Table: workersAiInferencesAdaptiveGroups, field: neuronsUsed
+      // Requires "Account Analytics:Read" token permission
+      const tomorrowUTC = new Date(Date.UTC(
+        now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1
+      )).toISOString().slice(0, 10);
+
+      const gqlQuery = {
+        query: `{
+          viewer {
+            accounts(filter: { accountTag: "${accountId}" }) {
+              workersAiInferencesAdaptiveGroups(
+                filter: {
+                  datetimeDay_geq: "${todayUTC}"
+                  datetimeDay_lt: "${tomorrowUTC}"
+                }
+                limit: 100
+              ) {
+                sum {
+                  neuronsUsed
+                }
+              }
+            }
+          }
+        }`
+      };
+
+      const gqlRes = await fetchFn(
+        "https://api.cloudflare.com/client/v4/graphql",
+        {
+          method: "POST",
+          headers: {
+            "Authorization": `Bearer ${apiKey}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(gqlQuery),
+        },
+        proxyOptions || undefined
+      );
+
+      if (gqlRes.ok) {
+        const gqlData = await gqlRes.json().catch(() => null);
+
+        // Log GraphQL errors for debugging
+        if (gqlData?.errors?.length) {
+          console.warn(`[CF-QUOTA] GraphQL errors for ${accountId}:`, JSON.stringify(gqlData.errors[0]));
+        }
+
+        const groups = gqlData?.data?.viewer?.accounts?.[0]?.workersAiInferencesAdaptiveGroups;
+
+        if (Array.isArray(groups)) {
+          const neuronsUsed = groups.reduce((total, g) => total + (g?.sum?.neuronsUsed || 0), 0);
+          const remaining = Math.max(0, FREE_TIER_TOTAL - neuronsUsed);
+
+          return {
+            quotas: {
+              "Workers AI": {
+                total: FREE_TIER_TOTAL,
+                used: neuronsUsed,
+                remaining,
+                unit: "neurons",
+                resetAt: nextMidnightUTC.toISOString(),
+              },
+            },
+            plan: "Free Tier",
+          };
+        }
+      } else {
+        const errText = await gqlRes.text().catch(() => "");
+        console.warn(`[CF-QUOTA] GraphQL HTTP ${gqlRes.status} for ${accountId}: ${errText.slice(0, 200)}`);
+      }
+    } catch (gqlErr) {
+      console.warn(`[CF-QUOTA] GraphQL exception for ${accountId}:`, gqlErr.message);
+    }
+  }
+
+  // === Step 2: Fallback — verify token is active, return static quota ===
   try {
-    // Verify token via Cloudflare token verify endpoint
-    const fetchFn = proxyOptions ? proxyAwareFetch : fetch;
     const res = await fetchFn(
       "https://api.cloudflare.com/client/v4/user/tokens/verify",
       {
@@ -1575,24 +1669,19 @@ async function getCloudflareAIUsage(connection, proxyOptions = null) {
       return { message: `Token status: ${tokenStatus}` };
     }
 
-    // Calculate next daily reset (midnight UTC)
-    const now = new Date();
-    const nextMidnightUTC = new Date(Date.UTC(
-      now.getUTCFullYear(),
-      now.getUTCMonth(),
-      now.getUTCDate() + 1,
-      0, 0, 0, 0
-    ));
-
-    // Free tier: 10,000 neurons/day. We don't know usage so show as full.
+    // Token is active but we couldn't fetch real usage
+    // Return static quota with a note
     return {
       quotas: {
         "Workers AI": {
-          total: 10000,
+          total: FREE_TIER_TOTAL,
           used: 0,
-          remaining: 10000,
+          remaining: FREE_TIER_TOTAL,
           unit: "neurons",
           resetAt: nextMidnightUTC.toISOString(),
+          note: accountId
+            ? "Could not fetch real usage from GraphQL API"
+            : "Add accountId to credentials for real usage data",
         },
       },
       plan: "Free Tier",
