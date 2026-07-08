@@ -141,27 +141,29 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     log?.debug?.("CODEBUDDY", "Sanitized system prompt for Tencent content moderation");
   }
 
-   // Cloudflare Workers AI: cap max_tokens + truncate messages to prevent runaway reasoning.
+  // Cloudflare Workers AI: cap max_tokens + truncate messages to prevent runaway reasoning.
   // Free tier has ~75s execution limit and very limited compute.
-  // 104K tokens context = always slow/timeout. Keep last 20 msgs to stay under ~25K tokens.
   if (provider === "cloudflare-ai") {
     // Reasoning models (glm-5.2, kimi-k2, qwq, deepseek-r1) exhaust token budget on
     // reasoning_content before producing actual output → client sees silence until CF timeout (75s).
-    // Cap to 4096 for these models so output arrives sooner.
+    // Cap output to 4096 + aggressively truncate context to minimize input processing time.
     const isReasoningModel = stripList?.includes("thinking");
     const cfMaxTokens = isReasoningModel ? 4096 : 8192;
     if (!translatedBody.max_tokens || translatedBody.max_tokens > cfMaxTokens) {
       translatedBody.max_tokens = cfMaxTokens;
     }
 
-    // Truncate messages: keep system (idx 0) + last 20 non-system messages
-    if (Array.isArray(translatedBody.messages) && translatedBody.messages.length > 22) {
+    // Truncate messages:
+    // - Reasoning models: keep last 8 msgs (~6-10K input tokens) to stay within 75s CF limit
+    // - Non-reasoning models: keep last 20 msgs (~25K tokens is usually fine)
+    const msgLimit = isReasoningModel ? 8 : 20;
+    if (Array.isArray(translatedBody.messages) && translatedBody.messages.length > msgLimit + 2) {
       const system = translatedBody.messages[0]?.role === "system" ? [translatedBody.messages[0]] : [];
       const nonSystem = translatedBody.messages.filter(m => m.role !== "system");
-      const kept = nonSystem.slice(-20); // last 20 messages
+      const kept = nonSystem.slice(-msgLimit);
       const before = translatedBody.messages.length;
       translatedBody.messages = [...system, ...kept];
-      log?.info?.("CF-AI", `Truncated ${before} → ${translatedBody.messages.length} msgs (kept last 20 + system)`);
+      log?.info?.("CF-AI", `Truncated ${before} → ${translatedBody.messages.length} msgs (kept last ${msgLimit} + system, reasoning=${isReasoningModel})`);
     }
   }
 
