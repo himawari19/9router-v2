@@ -1405,33 +1405,29 @@ def main():
                                 page.screenshot(path="/tmp/cf_gak_before_ts.png")
                                 _ts_clicked = False
 
-                                # Check if Turnstile iframe is present in modal
+                                # Solve Turnstile in GAK modal
+                                # Strategy: try auto-click first (works in non-headless Camoufox),
+                                # then ALWAYS try 2Captcha inject as insurance (token injected
+                                # before View is clicked, so CF accepts it either way).
                                 _gak_ts_frame = next((f for f in page.frames if 'challenges.cloudflare.com' in (f.url or '')), None)
                                 if _gak_ts_frame:
-                                    log_step("GAK TS: Turnstile frame found, trying auto-click first...")
+                                    log_step("GAK TS: Turnstile frame found")
+                                    # Step 1: auto-click (non-headless Camoufox auto-solves)
                                     _ts_clicked = try_click_turnstile_checkbox(page)
                                     log_step(f"GAK TS auto-click result: {_ts_clicked}")
-                                    if _ts_clicked:
-                                        time.sleep(8)  # wait for Camoufox auto-solve
-                                    # Check if still unsolved (modal still open after auto-click)
-                                    _modal_still_open = False
-                                    try:
-                                        _modal_still_open = page.locator("[role='dialog']").is_visible(timeout=2000)
-                                    except Exception:
-                                        pass
-                                    # Fallback to 2Captcha if modal still open (headless mode)
-                                    if _modal_still_open and args.captcha_key:
-                                        log_step("GAK TS: auto-click failed (headless?), using 2Captcha...")
+                                    time.sleep(5)  # wait for potential auto-solve
+                                    # Step 2: always inject 2Captcha token as well (headless fallback)
+                                    if args.captcha_key:
+                                        log_step("GAK TS: injecting 2Captcha token...")
                                         try:
                                             _gak_sitekey = get_turnstile_sitekey(page)
                                             _gak_ts_tok = solve_turnstile_2captcha(
                                                 args.captcha_key,
                                                 "https://dash.cloudflare.com/profile/api-tokens",
                                                 _gak_sitekey,
-                                                timeout=150,
+                                                timeout=120,
                                             )
                                             if _gak_ts_tok:
-                                                # Inject token into the Turnstile response fields
                                                 page.evaluate(f"""
                                                     () => {{
                                                         for (const name of ['cf-turnstile-response', 'cf_challenge_response']) {{
@@ -1441,15 +1437,19 @@ def main():
                                                                 el.dispatchEvent(new Event('change', {{bubbles: true}}));
                                                             }}
                                                         }}
+                                                        // Also try the Turnstile callback if available
+                                                        try {{
+                                                            if (window.turnstile && window.turnstile.reset) window.turnstile.reset();
+                                                        }} catch(e) {{}}
                                                     }}
                                                 """)
                                                 time.sleep(2)
-                                                log_step("GAK TS: 2Captcha token injected")
+                                                log_step(f"GAK TS: 2Captcha token injected ({_gak_ts_tok[:12]}...)")
                                                 _ts_clicked = True
                                         except Exception as _2ce:
                                             log_step(f"GAK TS 2Captcha error: {_2ce}")
                                 else:
-                                    log_step("GAK TS: no Turnstile iframe in modal (skip)")
+                                    log_step("GAK TS: no Turnstile frame in modal (skip)")
                                     _ts_clicked = True  # no Turnstile needed
 
                                 page.screenshot(path="/tmp/cf_gak_before_submit.png")
