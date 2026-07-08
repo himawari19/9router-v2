@@ -39,8 +39,18 @@ export async function POST_handler(req: any, res: any) {
       return res.status(400).json({ error: "globalApiKey and email are required" });
     }
 
+    // Validate Global API Key format: must be 37 hex chars (cfk_ prefix OR legacy 37-char hex)
+    const cleanGAK = String(globalApiKey).trim();
+    const cleanEmail = String(email).trim();
+    if (!cleanGAK || cleanGAK.length < 32) {
+      return res.status(400).json({ error: "Invalid Global API Key format. Must be your Cloudflare Global API Key (37 hex chars), not a scoped token." });
+    }
+    if (!cleanEmail.includes("@")) {
+      return res.status(400).json({ error: "Invalid email format" });
+    }
+
     // 1. List accounts → take first
-    const accounts = await cfFetch("/accounts?per_page=1", globalApiKey, email);
+    const accounts = await cfFetch("/accounts?per_page=1", cleanGAK, cleanEmail);
     if (!accounts || accounts.length === 0) {
       return res.status(400).json({ error: "No Cloudflare accounts found for this credential" });
     }
@@ -51,8 +61,8 @@ export async function POST_handler(req: any, res: any) {
     // 2. Get permission groups → find Workers AI Read + Edit
     const permGroups = await cfFetch(
       `/accounts/${accountId}/tokens/permission_groups`,
-      globalApiKey,
-      email
+      cleanGAK,
+      cleanEmail
     ) as { id: string; name: string }[];
 
     const readGroup = permGroups.find(
@@ -67,19 +77,26 @@ export async function POST_handler(req: any, res: any) {
         || (g.name.toLowerCase().includes("account analytics") && g.name.toLowerCase().includes("read"))
     );
 
-    if (!readGroup || !editGroup) {
-      // Fallback: try to find by partial name
-      const read2 = permGroups.find((g) => g.name.toLowerCase().includes("workers ai") && g.name.toLowerCase().includes("read"));
-      const edit2 = permGroups.find((g) => g.name.toLowerCase().includes("workers ai") && g.name.toLowerCase().includes("edit"));
-      if (!read2 || !edit2) {
-        return res.status(400).json({
-          error: `Workers AI permission groups not found. Available: ${permGroups.map(g => g.name).join(", ")}`,
-        });
-      }
+    // Fallback: exclude "Metadata" to avoid picking "Workers AI Metadata Read" over "Workers AI Read"
+    const waFallbackRead = permGroups.find((g) =>
+      g.name.toLowerCase().includes("workers ai") &&
+      g.name.toLowerCase().includes("read") &&
+      !g.name.toLowerCase().includes("metadata")
+    );
+    const waFallbackWrite = permGroups.find((g) =>
+      g.name.toLowerCase().includes("workers ai") &&
+      (g.name.toLowerCase().includes("write") || g.name.toLowerCase().includes("edit")) &&
+      !g.name.toLowerCase().includes("metadata")
+    );
+
+    if (!readGroup && !waFallbackRead) {
+      return res.status(400).json({
+        error: `Workers AI permission groups not found. Available: ${permGroups.map(g => g.name).join(", ")}`,
+      });
     }
 
-    const finalReadGroup = readGroup || permGroups.find((g) => g.name.toLowerCase().includes("workers ai") && g.name.toLowerCase().includes("read"));
-    const finalEditGroup = editGroup || permGroups.find((g) => g.name.toLowerCase().includes("workers ai") && g.name.toLowerCase().includes("edit"));
+    const finalReadGroup = readGroup || waFallbackRead;
+    const finalEditGroup = editGroup || waFallbackWrite || finalReadGroup;
 
     // 3. Create token — include Account Analytics:Read for GraphQL quota tracking
     const permissionGroups: { id: string }[] = [
@@ -101,7 +118,7 @@ export async function POST_handler(req: any, res: any) {
       ],
     };
 
-    const tokenResult = await cfFetch("/user/tokens", globalApiKey, email, {
+    const tokenResult = await cfFetch("/user/tokens", cleanGAK, cleanEmail, {
       method: "POST",
       body: JSON.stringify(tokenPayload),
     }) as { value: string; id: string };
