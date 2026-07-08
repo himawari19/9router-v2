@@ -127,7 +127,8 @@ CF_SIGNUP_PAGE_URL = "https://dash.cloudflare.com/sign-up"
 def get_turnstile_sitekey(page, fallback=CF_SIGNUP_TURNSTILE_SITEKEY):
     """Scrape the actual Turnstile sitekey from page — avoids hardcode becoming stale."""
     try:
-        sitekey = page.evaluate("""
+        sitekey = page.evaluate(
+            r"""
             () => {
                 // Method 1: data-sitekey attribute
                 const el = document.querySelector('[data-sitekey]');
@@ -146,7 +147,8 @@ def get_turnstile_sitekey(page, fallback=CF_SIGNUP_TURNSTILE_SITEKEY):
                 } catch(e) {}
                 return null;
             }
-        """)
+        """
+        )
         if sitekey and len(sitekey.strip()) > 10:
             log_step(f"Sitekey dari halaman: {sitekey}")
             return sitekey.strip()
@@ -823,7 +825,23 @@ def main():
 
         if email_already_registered:
             # Navigate FRESH to /login (don't carry stale security_token from verify link)
-            page.goto("https://dash.cloudflare.com/login", wait_until="domcontentloaded", timeout=30000)
+            # Use try/except — CF SPA can abort domcontentloaded with NS_BINDING_ABORTED
+            for _goto_attempt in range(3):
+                try:
+                    page.goto("https://dash.cloudflare.com/login",
+                              wait_until="domcontentloaded", timeout=30000)
+                    break
+                except Exception as _ge:
+                    if "NS_BINDING_ABORTED" in str(_ge) or "net::ERR_ABORTED" in str(_ge):
+                        log_step(f"Login goto aborted (attempt {_goto_attempt+1}), retry with commit...")
+                        try:
+                            page.wait_for_load_state("domcontentloaded", timeout=10000)
+                            break
+                        except Exception:
+                            time.sleep(2)
+                    else:
+                        log_step(f"Login goto error: {_ge}")
+                        break
             time.sleep(3)
 
 
@@ -863,7 +881,21 @@ def main():
         else:
             log_step("Login ke Cloudflare Dashboard...")
             try:
-                page.goto("https://dash.cloudflare.com/login", wait_until="domcontentloaded", timeout=20000)
+                for _goto_attempt2 in range(3):
+                    try:
+                        page.goto("https://dash.cloudflare.com/login",
+                                  wait_until="domcontentloaded", timeout=20000)
+                        break
+                    except Exception as _ge2:
+                        if "NS_BINDING_ABORTED" in str(_ge2) or "net::ERR_ABORTED" in str(_ge2):
+                            log_step(f"Login goto aborted (attempt {_goto_attempt2+1}), wait for load...")
+                            try:
+                                page.wait_for_load_state("domcontentloaded", timeout=10000)
+                                break
+                            except Exception:
+                                time.sleep(2)
+                        else:
+                            raise
                 time.sleep(2)
 
                 # Check if already redirected to dashboard
