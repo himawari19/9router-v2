@@ -1529,45 +1529,66 @@ async function getKimiCodingUsage(accessToken, proxyOptions = null) {
 
 async function getCloudflareUsage(connection, proxyOptions = null) {
   try {
-    const { apiKey, providerSpecificData, errorCode, backoffLevel, lastError, lastErrorAt } = connection;
+    const { id: connectionId, providerSpecificData, errorCode, lastError } = connection;
     const accountId = providerSpecificData?.accountId;
     if (!accountId) {
       return { message: "Cloudflare: missing Account ID in provider settings." };
     }
 
-    // CF does not expose a REST/GraphQL usage endpoint accessible via scoped Worker AI tokens.
-    // Detect exhaustion from connection's stored error state (set by executor after 429).
-    const CF_DAILY_QUOTA = 10000; // neurons/day — free tier
+    // CF does not expose REST/GraphQL usage for scoped tokens.
+    // Use local 9router request logs (usageDaily.byAccount) for real-time tracking.
+    // Neurons ≈ tokens processed (rough 1:1 approximation for free-tier planning).
+    const CF_DAILY_QUOTA = 10000;
     const isExhausted = errorCode === 429 || errorCode === "429";
-
-    // Count modelLock keys to estimate usage (each lock = 1 full-day exhaustion on that model)
-    const modelLocks = Object.keys(connection).filter(k => k.startsWith("modelLock_"));
-    const lockedModels = modelLocks.length;
 
     // Reset time: CF resets daily at midnight UTC
     const now = new Date();
     const resetAt = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1)).toISOString();
 
-    // Build quota entry
-    // If exhausted: show used = total (0 remaining). If not: show 0 used (can't know actual).
-    const neuronsUsed = isExhausted ? CF_DAILY_QUOTA : 0;
+    // Read today's actual token usage from local DB
+    let neuronsUsed = 0;
+    try {
+      const { getDailyUsageByConnection } = await import("../../lib/db/index.js");
+      const daily = await getDailyUsageByConnection(connectionId);
+      if (daily) {
+        // CF neuron pricing: output tokens drive 90%+ of cost.
+        // Input tokens are cheap (cached/batched). Use only completion_tokens as proxy.
+        // CF free tier: ~10,000 neurons/day ≈ ~1,000-5,000 output tokens depending on model.
+        // We count requests instead as simplest proxy when output tokens are too small.
+        const outTokens = daily.completionTokens || 0;
+        // Each request approximated as 100 neurons (model overhead + output)
+        const requestNeurons = (daily.requests || 0) * 100;
+        neuronsUsed = Math.max(outTokens, requestNeurons);
+        // If already exhausted (429), show as full
+        if (isExhausted && neuronsUsed < CF_DAILY_QUOTA) neuronsUsed = CF_DAILY_QUOTA;
+      } else if (isExhausted) {
+        neuronsUsed = CF_DAILY_QUOTA;
+      }
+    } catch (_) {
+      // DB read failed — fallback to errorCode-based detection
+      neuronsUsed = isExhausted ? CF_DAILY_QUOTA : 0;
+    }
+
+
+    // Cap at daily quota (over-counting possible with multi-account rotation)
+    const displayUsed = Math.min(neuronsUsed, CF_DAILY_QUOTA);
 
     return {
       status: isExhausted ? "rate_limited" : "active",
       accountId,
       quotas: {
         "Workers AI": {
-          used: neuronsUsed,
+          used: displayUsed,
           total: CF_DAILY_QUOTA,
           resetAt,
           unit: "neurons",
           exhausted: isExhausted,
-          lockedModels,
+          note: "Tracked locally (tokens ≈ neurons). Resets midnight UTC.",
         },
       },
       note: isExhausted
-        ? `Quota exhausted (10,000 neurons/day). Resets at midnight UTC. Last error: ${lastError?.slice?.(0, 80) || "429"}`
-        : "Cloudflare Workers AI — free tier: 10,000 neurons/day. Actual usage not available via API.",
+        ? `Quota exhausted. Resets at midnight UTC. Last error: ${lastError?.slice?.(0, 80) || "429"}`
+        : `Cloudflare Workers AI — ${displayUsed.toLocaleString()} / ${CF_DAILY_QUOTA.toLocaleString()} neurons used today.`,
     };
   } catch (error) {
     return { message: `Cloudflare: ${error.message}` };

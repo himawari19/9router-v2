@@ -349,6 +349,26 @@ function loadDaysInRange(adapter, maxDays) {
   return adapter.all(`SELECT dateKey, data FROM usageDaily WHERE dateKey >= ?`, [cutoffKey]);
 }
 
+/**
+ * Get today's token usage for a specific connectionId from usageDaily.byAccount.
+ * Returns { promptTokens, completionTokens, requests } or null if no data.
+ */
+export async function getDailyUsageByConnection(connectionId) {
+  if (!connectionId) return null;
+  const db = await getAdapter();
+  const dateKey = getLocalDateKey(new Date().toISOString());
+  const row = db.get(`SELECT data FROM usageDaily WHERE dateKey = ?`, [dateKey]);
+  if (!row) return null;
+  const day = parseJson(row.data, {});
+  const acc = day?.byAccount?.[connectionId];
+  if (!acc) return null;
+  return {
+    promptTokens: acc.promptTokens || 0,
+    completionTokens: acc.completionTokens || 0,
+    requests: acc.requests || 0,
+  };
+}
+
 export async function getUsageStats(period = "all") {
   const db = await getAdapter();
 
