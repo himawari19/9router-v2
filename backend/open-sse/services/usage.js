@@ -1645,7 +1645,25 @@ async function getCloudflareAIUsage(connection, proxyOptions = null) {
     }
   }
 
-  // === Step 2: Fallback — verify token is active, return static quota ===
+  // === Step 2: Fallback — local DB tracking (usageDaily.byAccount) ===
+  // Token is valid but no GraphQL analytics permission.
+  // Use 9router's own request logs for real-time approximation.
+  let localNeurons = 0;
+  const isExhausted = connection.errorCode === 429 || connection.errorCode === "429";
+  try {
+    const { getDailyUsageByConnection } = await import("../../src/lib/db/index.js");
+    const daily = await getDailyUsageByConnection(connection.id);
+    if (daily) {
+      const out = daily.completionTokens || 0;
+      const req = daily.requests || 0;
+      localNeurons = Math.max(out, req * 100);
+    }
+    if (isExhausted && localNeurons < FREE_TIER_TOTAL) localNeurons = FREE_TIER_TOTAL;
+  } catch (_) {
+    if (isExhausted) localNeurons = FREE_TIER_TOTAL;
+  }
+
+  // === Step 3: Verify token is active ===
   try {
     const res = await fetchFn(
       "https://api.cloudflare.com/client/v4/user/tokens/verify",
@@ -1669,19 +1687,20 @@ async function getCloudflareAIUsage(connection, proxyOptions = null) {
       return { message: `Token status: ${tokenStatus}` };
     }
 
-    // Token is active but we couldn't fetch real usage
-    // Return static quota with a note
+    const displayUsed = Math.min(localNeurons, FREE_TIER_TOTAL);
+    const noteText = localNeurons > 0
+      ? "Tracked from local request logs (tokens ≈ neurons). Resets midnight UTC."
+      : (accountId ? "Could not fetch real usage from GraphQL API" : "Add accountId for real usage data");
+
     return {
       quotas: {
         "Workers AI": {
           total: FREE_TIER_TOTAL,
-          used: 0,
-          remaining: FREE_TIER_TOTAL,
+          used: displayUsed,
+          remaining: Math.max(0, FREE_TIER_TOTAL - displayUsed),
           unit: "neurons",
           resetAt: nextMidnightUTC.toISOString(),
-          note: accountId
-            ? "Could not fetch real usage from GraphQL API"
-            : "Add accountId to credentials for real usage data",
+          note: noteText,
         },
       },
       plan: "Free Tier",
