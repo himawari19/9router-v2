@@ -69,7 +69,7 @@ def create_ammail_inbox(base_url, api_key, email):
     except Exception:
         pass  # might already exist
 
-def wait_for_cf_verify_email(base_url, api_key, email, timeout=120):
+def wait_for_cf_verify_email(base_url, api_key, email, timeout=240):
     log_step(f"Menunggu email verifikasi Cloudflare ({email})...")
     alias = email.split("@")[0]
     deadline = time.time() + timeout
@@ -84,7 +84,17 @@ def wait_for_cf_verify_email(base_url, api_key, email, timeout=120):
                 if msg_id in seen_ids:
                     continue
                 seen_ids.add(msg_id)
-                if "cloudflare" in subject.lower() or "verify" in subject.lower() or "confirm" in subject.lower():
+                # Broader subject matching — CF sometimes uses different subject lines
+                subj_lower = subject.lower()
+                is_cf_email = (
+                    "cloudflare" in subj_lower or
+                    "verify" in subj_lower or
+                    "confirm" in subj_lower or
+                    "email" in subj_lower or
+                    "activate" in subj_lower or
+                    "validate" in subj_lower
+                )
+                if is_cf_email:
                     # Fetch full message body
                     try:
                         full = ammail_request(base_url, api_key, f"/messages/{urllib.parse.quote(msg_id)}")
@@ -110,8 +120,41 @@ def wait_for_cf_verify_email(base_url, api_key, email, timeout=120):
     return None
 
 # ── 2Captcha Turnstile solver ───────────────────────────────────────────────────
+# Hardcoded sitekey as fallback — scraping from page is preferred (see get_turnstile_sitekey)
 CF_SIGNUP_TURNSTILE_SITEKEY = "0x4AAAAAAAJel0iaAR3mgkjp"
 CF_SIGNUP_PAGE_URL = "https://dash.cloudflare.com/sign-up"
+
+def get_turnstile_sitekey(page, fallback=CF_SIGNUP_TURNSTILE_SITEKEY):
+    """Scrape the actual Turnstile sitekey from page — avoids hardcode becoming stale."""
+    try:
+        sitekey = page.evaluate("""
+            () => {
+                // Method 1: data-sitekey attribute
+                const el = document.querySelector('[data-sitekey]');
+                if (el) return el.getAttribute('data-sitekey');
+                // Method 2: inside Turnstile iframe src
+                for (const iframe of document.querySelectorAll('iframe')) {
+                    const src = iframe.src || '';
+                    const m = src.match(/[?&]sitekey=([^&]+)/);
+                    if (m) return decodeURIComponent(m[1]);
+                }
+                // Method 3: window.__CF$cv$params
+                try {
+                    const raw = JSON.stringify(window.__CF$cv$params || {});
+                    const m2 = raw.match(/sitekey["']?\s*:\s*["']([^"']+)["']/);
+                    if (m2) return m2[1];
+                } catch(e) {}
+                return null;
+            }
+        """)
+        if sitekey and len(sitekey.strip()) > 10:
+            log_step(f"Sitekey dari halaman: {sitekey}")
+            return sitekey.strip()
+    except Exception as e:
+        log_step(f"get_turnstile_sitekey error: {e}")
+    log_step(f"Pakai sitekey hardcode: {fallback}")
+    return fallback
+
 
 def solve_turnstile_2captcha(api_key, page_url, sitekey, timeout=120):
     """Submit Turnstile to 2Captcha and wait for solution token."""
@@ -676,18 +719,32 @@ def main():
         log_step("Menangani Turnstile captcha...")
         time.sleep(3)
 
-        # First try auto-solve (works sometimes in non-headless)
+        # First try auto-solve with retry — checks both cf_challenge_response and cf-turnstile-response
         turnstile_solved = False
-        wait_for_cf_clearance(page, timeout=10)
+        for _ts_attempt in range(3):
+            wait_for_cf_clearance(page, timeout=10)
+            try:
+                token_val = page.evaluate("""
+                    () => {
+                        const names = ['cf-turnstile-response', 'cf_challenge_response', 'cf-turnstile-response-0'];
+                        for (const n of names) {
+                            const el = document.querySelector(`input[name="${n}"]`) || document.getElementById(n);
+                            if (el && el.value && el.value.length > 10) return el.value;
+                        }
+                        return '';
+                    }
+                """)
+                if token_val and len(token_val.strip()) > 10:
+                    turnstile_solved = True
+                    log_step(f"Turnstile auto-solved! (attempt {_ts_attempt+1})")
+                    break
+            except Exception:
+                pass
+            if _ts_attempt < 2:
+                time.sleep(3)
 
-        # Check if already solved
-        try:
-            token_val = page.evaluate("() => { const el = document.getElementsByName('cf_challenge_response')[0]; return el ? el.value : ''; }")
-            if token_val and len(token_val.strip()) > 10:
-                turnstile_solved = True
-                log_step("Turnstile auto-solved!")
-        except Exception:
-            pass
+        # Scrape actual sitekey from page (not hardcode)
+        actual_sitekey = get_turnstile_sitekey(page)
 
         # Fallback: 2Captcha
         if not turnstile_solved and args.captcha_key:
@@ -695,8 +752,8 @@ def main():
             token_2c = solve_turnstile_2captcha(
                 args.captcha_key,
                 CF_SIGNUP_PAGE_URL,
-                CF_SIGNUP_TURNSTILE_SITEKEY,
-                timeout=120,
+                actual_sitekey,
+                timeout=150,
             )
             if token_2c:
                 inject_turnstile_token(page, token_2c)
@@ -776,7 +833,7 @@ def main():
                 args.ammail_base_url,
                 args.ammail_api_key,
                 args.email,
-                timeout=180,
+                timeout=240,
             )
             if verify_link:
                 log_step(f"Membuka link verifikasi...")
@@ -922,11 +979,12 @@ def main():
 
                         if not login_turnstile_solved and args.captcha_key:
                             log_step("Solve Turnstile login via 2Captcha...")
+                            login_sitekey = get_turnstile_sitekey(page)
                             login_token = solve_turnstile_2captcha(
                                 args.captcha_key,
                                 "https://dash.cloudflare.com/login",
-                                CF_SIGNUP_TURNSTILE_SITEKEY,
-                                timeout=120,
+                                login_sitekey,
+                                timeout=150,
                             )
                             if login_token:
                                 inject_turnstile_token(page, login_token)
